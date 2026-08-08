@@ -75,7 +75,7 @@ preserved; backups are kept.
 | Line | Content (shown only when available) |
 |---|---|
 | 1 | model · working dir · `git:<branch>✱` · session duration · cost · config counts (CLAUDE.md / rules / MCPs / hooks) |
-| 2 | context bar (color-coded) · `used/size ↑in ↓out` · `effort` · `thinking` · `⚡fast` |
+| 2 | context bar (color-coded) · `used/size ↑in ↓out` · `5h`/`7d` rate limits (if the backend provides them) · `effort` · `thinking` · `⚡fast` |
 | 3 | `◐` running tools (name + target, `×N`) · `✓` completed tools (name `×N`) |
 | 4 | `▸` active task + `(done/total)` · `⊕` subagent count |
 
@@ -100,6 +100,10 @@ omitted.
 - Temp/cache files use `tempfile.gettempdir()` - never a hardcoded `/tmp`.
 - ANSI colors work in modern Windows Terminal / PowerShell; set `NO_COLOR=1` to
   disable color everywhere.
+- Colors **adapt to the terminal background**: set `CLAUDE_HUD_BG=light` (or
+  `dark`) explicitly, or rely on auto-detection from the `COLORFGBG` env var.
+  On light backgrounds, secondary text uses dark grey instead of `dim` (which is
+  near-invisible on white) and low-contrast colors are bolded. Default is dark.
 
 ## Customize
 

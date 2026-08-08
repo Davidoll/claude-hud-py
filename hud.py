@@ -43,10 +43,44 @@ BAR_FULL = "█"
 BAR_EMPTY = "░"
 
 # ---------------------------------------------------------------------------
-# ANSI colors (respects NO_COLOR)
+# ANSI colors (respects NO_COLOR; adapts to light/dark background)
 # ---------------------------------------------------------------------------
+def _detect_light_bg():
+    """Best-effort terminal background detection.
+
+    Priority: CLAUDE_HUD_BG env > COLORFGBG env > default dark.
+    COLORFGBG is "fg;bg" (e.g. "15;0" = light text on dark bg); bg >= 7
+    means a bright/light background.
+    """
+    bg = os.environ.get("CLAUDE_HUD_BG", "").lower()
+    if bg in ("light", "white", "bright"):
+        return True
+    if bg in ("dark", "black"):
+        return False
+    colorfgbg = os.environ.get("COLORFGBG", "")
+    if ";" in colorfgbg:
+        try:
+            return int(colorfgbg.split(";")[-1]) >= 7
+        except ValueError:
+            pass
+    return False
+
+
 if os.environ.get("NO_COLOR"):
     RESET = DIM = BOLD = RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = ""
+elif _detect_light_bg():
+    # Light background: ANSI dim is nearly invisible, so secondary text uses
+    # bright-black (dark grey) instead, and low-contrast colors get bold.
+    RESET = "\033[0m"
+    DIM = "\033[90m"       # dark grey - readable secondary text on light bg
+    BOLD = "\033[1m"
+    RED = "\033[31m"
+    GREEN = "\033[1;32m"
+    YELLOW = "\033[1;33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[1;35m"
+    CYAN = "\033[1;36m"
+    WHITE = "\033[30m"     # black reads better than white on light bg
 else:
     RESET = "\033[0m"
     DIM = "\033[2m"
@@ -123,6 +157,13 @@ def pct_color(pct):
     return GREEN
 
 
+def _to_float(v, default=0.0):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def render_bar(pct):
     pct = max(0, min(100, pct))
     filled = int(round(pct / 100 * BAR_WIDTH))
@@ -181,7 +222,7 @@ def extract_target(name, inp):
         p = strip_ansi(inp.get("file_path") or inp.get("path") or "")
         return os.path.basename(p) if p else ""
     if name == "Bash":
-        cmd = strip_ansi(inp.get("command", ""))
+        cmd = " ".join(strip_ansi(inp.get("command", "")).split())
         return (cmd[:27] + "...") if len(cmd) > 30 else cmd
     if name in ("Glob", "Grep"):
         return strip_ansi(inp.get("pattern", ""))[:30]
@@ -561,6 +602,16 @@ def build(data):
             f"{fmt_tokens(used_tok)}/{fmt_tokens(size)} "
             f"{DIM}↑{fmt_tokens(in_tok)} ↓{fmt_tokens(out_tok)}{RESET}"
         )
+    # rate limits (only when the backend provides them)
+    rl = data.get("rate_limits") or {}
+    five = rl.get("five_hour") or {}
+    seven = rl.get("seven_day") or {}
+    if five.get("used_percentage") is not None:
+        _p = _to_float(five["used_percentage"])
+        ctx_segs.append(f"{DIM}5h{RESET} {pct_color(_p)}{int(round(_p))}%{RESET}")
+    if seven.get("used_percentage") is not None:
+        _p = _to_float(seven["used_percentage"])
+        ctx_segs.append(f"{DIM}7d{RESET} {pct_color(_p)}{int(round(_p))}%{RESET}")
     flags = []
     if effort:
         flags.append(f"{YELLOW}effort:{effort}{RESET}")
@@ -583,9 +634,12 @@ def build(data):
         l3_segs.append(f"{YELLOW}◐{RESET} {CYAN}{'  '.join(items)}{RESET}")
     if completed:
         items = []
-        for name, n in completed.items():
+        for name, n in list(completed.items())[:6]:
             label = f"{name}" + (f" ×{n}" if n > 1 else "")
             items.append(f"{DIM}✓{RESET} {strip_ansi(label)}")
+        rest = len(completed) - 6
+        if rest > 0:
+            items.append(f"{DIM}✓ +{rest}{RESET}")
         l3_segs.append("  ".join(items))
 
     # --- line 4: active task + subagent (only if any) ---
