@@ -1,0 +1,4 @@
+# Keep shell/PowerShell scripts LF on every platform — CRLF line endings break
+# `curl … | sh` (POSIX sh chokes on the trailing \r) and `irm … | iex`.
+*.sh   text eol=lf
+*.ps1  text eol=lf
