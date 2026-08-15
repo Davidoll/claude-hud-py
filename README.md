@@ -116,7 +116,7 @@ preserved; backups are kept.
 
 | Line | Content (shown only when available) |
 |---|---|
-| 1 | model · working dir · session name · `git:<branch>✱` · `PR#<n> <state>` · session duration · cost + `+added -removed` lines · config counts (CLAUDE.md / rules / MCPs / hooks) |
+| 1 | model · working dir · session name · `git:<branch>✱` · `PR#<n> <state>` · session duration · cost + `+added -removed` lines · config counts (CLAUDE.md / rules / MCPs / hooks) · provider balance (if configured) |
 | 2 | context bar (color-coded) · `used/size ↑in ↓out` · `⤶cache <hit>%` · `5h`/`7d` rate limits + reset countdown (if the backend provides them) · `effort` · `thinking` · `⚡fast` |
 | 3 | `◐` running tools (name + target, `×N`) · `✓` completed tools (name `×N`) |
 | 4 | `▸` active task + `(done/total)` · `⊕` subagent count |
@@ -129,10 +129,22 @@ The status line runs on a `refreshInterval` (1s), so token counts and the
 cache-hit percentage update live during streaming responses instead of only
 between messages.
 
-> **No account balance.** The `statusLine` payload has no balance/credit field.
-> Cost (`$X.XX`), rate-limit usage + reset countdown, and cache-hit rate are all
-> shown; true billing balance would need an out-of-band API call (credentials +
-> a network request every tick), which is intentionally out of scope here.
+### Balance query (multi-provider)
+
+When the active backend exposes a balance endpoint, the HUD shows live account
+balance on line 1 (e.g. `DeepSeek balance ¥7.85`). It infers the provider from
+`ANTHROPIC_BASE_URL`, reads the key from `ANTHROPIC_AUTH_TOKEN` (process env
+first, then `~/.claude/settings.json`'s `env` block), queries the backend, and
+caches the result for 5 minutes so it doesn't slow the status line.
+
+- **Built-in**: DeepSeek (`GET /user/balance`); zero-balance currencies are
+  filtered out (no misleading `USD 0.00`).
+- **Disable**: set `CLAUDE_HUD_BALANCE=0`.
+- **Add a backend**: register a `@provider("name")` adapter in `hud.py` returning
+  `[(currency, amount), ...]` — that's the whole interface.
+- **Scope**: balance only. Third-party backends don't expose per-window usage;
+  session usage is already covered by the `cost`/token segments above.
+- Requests go only to your own backend with your own key.
 
 ### Color thresholds (context bar)
 

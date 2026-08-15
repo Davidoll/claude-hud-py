@@ -24,6 +24,8 @@ import glob
 import subprocess
 import tempfile
 import time
+import hashlib
+import urllib.request
 
 # ---------------------------------------------------------------------------
 # paths & constants
@@ -42,6 +44,8 @@ BAR_WIDTH = 20
 BAR_FULL = "█"
 BAR_EMPTY = "░"
 GIT_CACHE_MS = 5000
+BALANCE_CACHE_MS = 300000   # 5 min
+BALANCE_TIMEOUT = 2         # seconds
 
 # language: default English; CLAUDE_HUD_LANG=zh switches UI labels to Chinese
 LANG = os.environ.get("CLAUDE_HUD_LANG", "").lower()
@@ -545,6 +549,114 @@ def get_config_counts(cwd):
 
 
 # ---------------------------------------------------------------------------
+# balance/usage query (multi-provider, reserved interface)
+# ---------------------------------------------------------------------------
+BALANCE_PROVIDERS = {}
+BALANCE_PROVIDER_LABELS = {"deepseek": "DeepSeek"}
+BALANCE_CURRENCY_SYMBOLS = {"CNY": "¥", "USD": "$"}
+
+
+def provider(name):
+    """Register a balance-query adapter under a name (reserved interface)."""
+    def deco(fn):
+        BALANCE_PROVIDERS[name] = fn
+        return fn
+    return deco
+
+
+# Adapter contract: (api_key, base_url) -> list of (currency, amount_str) or None.
+# Zero-balance currencies are filtered by format_balance; any failure returns None.
+@provider("deepseek")
+def _deepseek_balance(api_key, base_url):
+    req = urllib.request.Request("https://api.deepseek.com/user/balance", headers={
+        "Accept": "application/json",
+        "Authorization": "Bearer " + api_key,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=BALANCE_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    items = []
+    for info in data.get("balance_infos") or []:
+        currency = info.get("currency")
+        total = info.get("total_balance")
+        if currency and total is not None:
+            items.append((currency, str(total)))
+    return items or None
+
+
+def detect_provider(base_url):
+    """Infer the backend from ANTHROPIC_BASE_URL, matching registered providers."""
+    if not base_url:
+        return None
+    low = base_url.lower()
+    for name in BALANCE_PROVIDERS:
+        if name in low:
+            return name
+    return None
+
+
+def load_backend_config():
+    """Read ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL: process env first, then
+    ~/.claude/settings.json's env block (cc-switch stores them there)."""
+    token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    base = os.environ.get("ANTHROPIC_BASE_URL", "")
+    if token:
+        return token, base
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            env = (json.load(f).get("env") or {})
+        return env.get("ANTHROPIC_AUTH_TOKEN", "") or "", env.get("ANTHROPIC_BASE_URL", "") or base
+    except Exception:
+        return "", base
+
+
+def fetch_balance(provider_name, api_key, base_url):
+    """Balance query with per-provider-per-key caching; returns list or None."""
+    if provider_name not in BALANCE_PROVIDERS or not api_key:
+        return None
+    key_hash = hashlib.md5(api_key.encode("utf-8")).hexdigest()[:8]
+    cache_file = os.path.join(tempfile.gettempdir(),
+                              "claude-hud-balance-%s-%s.json" % (provider_name, key_hash))
+    now = now_ms()
+    try:
+        with open(cache_file, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if now - cached.get("ts", 0) < BALANCE_CACHE_MS:
+            return cached.get("data")
+    except Exception:
+        pass
+    result = BALANCE_PROVIDERS[provider_name](api_key, base_url)
+    if result is None:
+        return None
+    try:
+        d = os.path.dirname(cache_file) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".hud-bal-", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"data": result, "ts": now_ms()}, f)
+        os.replace(tmp, cache_file)
+    except Exception:
+        pass
+    return result
+
+
+def format_balance(items):
+    """Filter zero-balance currencies and render '¥110.00 / $5.00' (or None)."""
+    parts = []
+    for currency, amount in items:
+        try:
+            if float(amount) <= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        sym = BALANCE_CURRENCY_SYMBOLS.get(currency, currency)
+        parts.append("%s%s" % (sym, amount))
+    return " / ".join(parts) or None
+
+
+# ---------------------------------------------------------------------------
 # build / render (dynamic 2-4 lines)
 # ---------------------------------------------------------------------------
 def build(data):
@@ -589,6 +701,19 @@ def build(data):
     tdata = parse_transcript(tpath)
     git = get_git(cwd, data.get("session_id", ""))
     config = get_config_counts(cwd)
+
+    # balance (multi-provider; disabled by CLAUDE_HUD_BALANCE=0)
+    balance_seg = ""
+    if os.environ.get("CLAUDE_HUD_BALANCE", "").strip() != "0":
+        _token, _base = load_backend_config()
+        _prov = detect_provider(_base)
+        if _prov:
+            _items = fetch_balance(_prov, _token, _base)
+            if _items:
+                _fmt = format_balance(_items)
+                if _fmt:
+                    _label = BALANCE_PROVIDER_LABELS.get(_prov, _prov)
+                    balance_seg = f"{DIM}{_label} {T('balance', '余额')} {GREEN}{_fmt}{RESET}"
 
     # running tools: hook state first, transcript fallback
     running = []
@@ -641,6 +766,8 @@ def build(data):
         cfg_segs.append(f"{config['hooks']} {T('hooks', '钩子')}")
     if cfg_segs:
         seg1.append(f"{DIM}{' · '.join(cfg_segs)}{RESET}")
+    if balance_seg:
+        seg1.append(balance_seg)
     line1 = " " + join_segs(seg1)
 
     # --- line 2: ctx bar pct · tokens · cache hit · rate limits · flags ---
