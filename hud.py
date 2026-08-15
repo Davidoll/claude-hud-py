@@ -41,6 +41,16 @@ RECENT_VISIBLE_MS = 3000
 BAR_WIDTH = 20
 BAR_FULL = "█"
 BAR_EMPTY = "░"
+GIT_CACHE_MS = 5000
+
+# language: default English; CLAUDE_HUD_LANG=zh switches UI labels to Chinese
+LANG = os.environ.get("CLAUDE_HUD_LANG", "").lower()
+IS_ZH = LANG.startswith("zh") or LANG in ("cn", "chinese")
+
+
+def T(en, zh):
+    """UI-label i18n: returns zh only when CLAUDE_HUD_LANG selects Chinese."""
+    return zh if IS_ZH else en
 
 # ---------------------------------------------------------------------------
 # ANSI colors (respects NO_COLOR; adapts to light/dark background)
@@ -466,9 +476,20 @@ def parse_transcript(path):
 # ---------------------------------------------------------------------------
 # git status & config counts
 # ---------------------------------------------------------------------------
-def get_git(cwd):
+def get_git(cwd, session_id=""):
     if not cwd:
         return None
+    # Cache per session (5s) so a 1s refreshInterval doesn't spawn git twice a tick.
+    key = session_id or "default"
+    cache_file = os.path.join(tempfile.gettempdir(), f"claude-hud-git-{key}.json")
+    now = now_ms()
+    try:
+        with open(cache_file, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if cached.get("cwd") == cwd and now - cached.get("ts", 0) < GIT_CACHE_MS:
+            return cached.get("data")
+    except Exception:
+        pass
     try:
         r = subprocess.run(["git", "-C", cwd, "branch", "--show-current"],
                            capture_output=True, text=True, timeout=2)
@@ -477,9 +498,19 @@ def get_git(cwd):
             return None
         s = subprocess.run(["git", "-C", cwd, "status", "--porcelain"],
                            capture_output=True, text=True, timeout=2)
-        return {"branch": strip_ansi(branch), "dirty": bool(s.stdout.strip())}
+        result = {"branch": strip_ansi(branch), "dirty": bool(s.stdout.strip())}
     except Exception:
         return None
+    try:
+        d = os.path.dirname(cache_file) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".hud-git-", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"cwd": cwd, "data": result, "ts": now_ms()}, f)
+        os.replace(tmp, cache_file)
+    except Exception:
+        pass
+    return result
 
 
 def get_config_counts(cwd):
@@ -527,10 +558,18 @@ def build(data):
     cost = data.get("cost") or {}
     duration = fmt_duration(cost.get("total_duration_ms"))
     cost_str = fmt_cost(cost.get("total_cost_usd"))
+    lines_add = cost.get("total_lines_added")
+    lines_rem = cost.get("total_lines_removed")
+    session_name = strip_ansi(data.get("session_name") or "")
+    pr = data.get("pr") or {}
     cw = data.get("context_window") or {}
     size = cw.get("context_window_size")
     in_tok = cw.get("total_input_tokens")
     out_tok = cw.get("total_output_tokens")
+    cu = cw.get("current_usage") or {}
+    fresh_in = cu.get("input_tokens") or 0
+    cache_r = cu.get("cache_read_input_tokens") or 0
+    cache_w = cu.get("cache_creation_input_tokens") or 0
     pct = cw.get("used_percentage")
     if pct is None:
         used = (in_tok or 0) + (out_tok or 0)
@@ -548,7 +587,7 @@ def build(data):
     tpath = sanitize_transcript_path(data.get("transcript_path", ""))
     hook = read_hook_state(state_file(data.get("transcript_path")))
     tdata = parse_transcript(tpath)
-    git = get_git(cwd)
+    git = get_git(cwd, data.get("session_id", ""))
     config = get_config_counts(cwd)
 
     # running tools: hook state first, transcript fallback
@@ -571,54 +610,81 @@ def build(data):
 
     # --- line 1: model · dir · git · dur · cost · configs ---
     seg1 = [f"{CYAN}{BOLD}◆ {strip_ansi(model)}{RESET}", f"{DIM}{strip_ansi(dirname)}{RESET}"]
+    if session_name:
+        seg1.append(f"{DIM}{session_name}{RESET}")
     if git:
         if git["dirty"]:
             seg1.append(f"{MAGENTA}git:{git['branch']}{RED}✱{RESET}")
         else:
             seg1.append(f"{MAGENTA}git:{git['branch']}{RESET}")
+    if pr.get("number"):
+        state = pr.get("review_state") or ""
+        pr_label = f"PR#{pr['number']}" + (f" {state}" if state else "")
+        seg1.append(f"{DIM}{pr_label}{RESET}")
     if duration:
         seg1.append(f"{DIM}{duration}{RESET}")
     if cost_str:
-        seg1.append(f"{GREEN}{cost_str}{RESET}")
+        lines_seg = ""
+        if lines_add:
+            lines_seg += f" {GREEN}+{lines_add}{RESET}"
+        if lines_rem:
+            lines_seg += f" {RED}-{lines_rem}{RESET}"
+        seg1.append(f"{GREEN}{cost_str}{RESET}{lines_seg}")
     cfg_segs = []
     if config["claudeMd"]:
         cfg_segs.append(f"{config['claudeMd']} CLAUDE.md")
     if config["rules"]:
-        cfg_segs.append(f"{config['rules']} rules")
+        cfg_segs.append(f"{config['rules']} {T('rules', '规则')}")
     if config["mcps"]:
-        cfg_segs.append(f"{config['mcps']} MCPs")
+        cfg_segs.append(f"{config['mcps']} {T('MCPs', 'MCP')}")
     if config["hooks"]:
-        cfg_segs.append(f"{config['hooks']} hooks")
+        cfg_segs.append(f"{config['hooks']} {T('hooks', '钩子')}")
     if cfg_segs:
         seg1.append(f"{DIM}{' · '.join(cfg_segs)}{RESET}")
     line1 = " " + join_segs(seg1)
 
-    # --- line 2: ctx bar pct · tokens · effort/thinking/fast ---
+    # --- line 2: ctx bar pct · tokens · cache hit · rate limits · flags ---
     col = pct_color(pct)
     used_tok = (in_tok or 0) + (out_tok or 0)
-    ctx_segs = [f"{col}ctx {render_bar(pct)} {pct_i}%{RESET}"]
+    ctx_segs = [f"{col}{T('ctx', '上下文')} {render_bar(pct)} {pct_i}%{RESET}"]
     if size:
         ctx_segs.append(
             f"{fmt_tokens(used_tok)}/{fmt_tokens(size)} "
             f"{DIM}↑{fmt_tokens(in_tok)} ↓{fmt_tokens(out_tok)}{RESET}"
         )
+    # cache hit rate (input-side): how much of the input came from cache
+    cache_total = cache_r + cache_w
+    if cache_total > 0:
+        denom = fresh_in + cache_total
+        hit = int(round(cache_total / denom * 100)) if denom else 0
+        ctx_segs.append(f"{DIM}⤶{T('cache', '缓存')} {hit}%{RESET}")
     # rate limits (only when the backend provides them)
     rl = data.get("rate_limits") or {}
     five = rl.get("five_hour") or {}
     seven = rl.get("seven_day") or {}
     if five.get("used_percentage") is not None:
         _p = _to_float(five["used_percentage"])
-        ctx_segs.append(f"{DIM}5h{RESET} {pct_color(_p)}{int(round(_p))}%{RESET}")
+        seg = f"{DIM}5h{RESET} {pct_color(_p)}{int(round(_p))}%{RESET}"
+        if five.get("resets_at"):
+            until_s = five["resets_at"] - time.time()
+            if until_s > 0:
+                seg += f"{DIM}({fmt_duration(until_s * 1000)}){RESET}"
+        ctx_segs.append(seg)
     if seven.get("used_percentage") is not None:
         _p = _to_float(seven["used_percentage"])
-        ctx_segs.append(f"{DIM}7d{RESET} {pct_color(_p)}{int(round(_p))}%{RESET}")
+        seg = f"{DIM}7d{RESET} {pct_color(_p)}{int(round(_p))}%{RESET}"
+        if seven.get("resets_at"):
+            until_s = seven["resets_at"] - time.time()
+            if until_s > 0:
+                seg += f"{DIM}({fmt_duration(until_s * 1000)}){RESET}"
+        ctx_segs.append(seg)
     flags = []
     if effort:
-        flags.append(f"{YELLOW}effort:{effort}{RESET}")
+        flags.append(f"{YELLOW}{T('effort', '思考强度')}:{effort}{RESET}")
     if thinking:
-        flags.append(f"{BLUE}thinking{RESET}")
+        flags.append(f"{BLUE}{T('thinking', '思考')}{RESET}")
     if fast:
-        flags.append(f"{YELLOW}⚡fast{RESET}")
+        flags.append(f"{YELLOW}⚡{T('fast', '快速')}{RESET}")
     ctx_segs.extend(flags)
     line2 = "   " + join_segs(ctx_segs)
 
@@ -649,9 +715,9 @@ def build(data):
         l4_segs.append(f"{YELLOW}▸{RESET} {strip_ansi(active_task['subject'])}{DIM}{prog}{RESET}")
     if agent_total > 0:
         if agent_running > 0:
-            agent_label = f"subagent {agent_running} running/×{agent_total}"
+            agent_label = f"{T('subagent', '子代理')} {agent_running} {T('running', '运行中')}/×{agent_total}"
         else:
-            agent_label = f"subagent ×{agent_total}"
+            agent_label = f"{T('subagent', '子代理')} ×{agent_total}"
         l4_segs.append(f"{BLUE}⊕{RESET} {DIM}{agent_label}{RESET}")
 
     lines = [line1, line2]
@@ -688,19 +754,43 @@ def main():
 MOCK = {
     "model": {"id": "glm-5.2", "display_name": "GLM-5.2[1m]"},
     "workspace": {"current_dir": "/home/linlinger/projects"},
-    "cost": {"total_cost_usd": 0.0421, "total_duration_ms": 742000},
+    "session_id": "mock-session",
+    "session_name": "claude-hud 优化",
+    "cost": {
+        "total_cost_usd": 0.0421,
+        "total_duration_ms": 742000,
+        "total_lines_added": 156,
+        "total_lines_removed": 23,
+    },
     "context_window": {
         "used_percentage": 38.2,
         "context_window_size": 200000,
         "total_input_tokens": 61234,
         "total_output_tokens": 14389,
+        "current_usage": {
+            "input_tokens": 21000,
+            "output_tokens": 14389,
+            "cache_creation_input_tokens": 8210,
+            "cache_read_input_tokens": 32024,
+        },
     },
+    "pr": {"number": 1234, "review_state": "pending"},
     "effort": {"level": "high"},
     "fast_mode": True,
+    "rate_limits": {
+        "five_hour": {"used_percentage": 23.5, "resets_at": time.time() + 3600 * 2 + 60 * 13},
+        "seven_day": {"used_percentage": 41.2, "resets_at": time.time() + 86400 * 3},
+    },
 }
 
 
 if __name__ == "__main__":
+    # Windows consoles default to cp936/GBK; force UTF-8 so █░⤶⊕ etc. render.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     args = sys.argv[1:]
     if "--pre-tool" in args:
         hook_pre()

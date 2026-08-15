@@ -6,8 +6,8 @@ usage, **live tool-call tracking** (e.g. how many Bash commands ran), **task
 progress**, and **subagent info** - all cross-platform (Linux / macOS / Windows).
 
 ```
- ◆ GLM-5.2[1m] · projects · git:main✱ · 12m · $0.04 · 1 CLAUDE.md · 2 MCPs
-   ctx ████████░░░░░░░░░░░░ 38% · 75K/200K ↑61K ↓14K · effort:high · ⚡fast
+ ◆ GLM-5.2[1m] · projects · 会话名 · git:main✱ · PR#42 · 12m · $0.04 +156 -23 · 1 CLAUDE.md · 2 MCPs
+   ctx ████████░░░░░░░░░░░░ 38% · 75K/200K ↑61K ↓14K · ⤶cache 66% · 5h 24%(2h12m) · effort:high · ⚡fast
    ◐ Bash: npm test  ◐ Agent: 分析transcript · ✓ Read ×3 ✓ Edit ×2 ✓ Bash ×11
    ▸ 实现 hud.py 主脚本 (1/3) · ⊕ subagent ×2
 ```
@@ -74,8 +74,9 @@ The installer:
 - downloads `hud.py` / `install.py` / `uninstall.py` and runs `install.py`, which:
   - copies `hud.py` to `~/.claude/statusline-hud/hud.py`
   - backs up `~/.claude/settings.json` to `settings.json.bak.<timestamp>`
-  - writes the `statusLine` entry **and** `PreToolUse`/`PostToolUse` hook groups
-    (idempotent - re-running updates in place without duplicating)
+  - writes the `statusLine` entry (with `refreshInterval: 1` for live token
+    updates) **and** `PreToolUse`/`PostToolUse` hook groups (idempotent -
+    re-running updates in place without duplicating)
 - copies `uninstall.py` next to `hud.py` for easy removal later
 
 It does **not** install Claude Code - if `claude` isn't on your PATH it warns.
@@ -115,14 +116,23 @@ preserved; backups are kept.
 
 | Line | Content (shown only when available) |
 |---|---|
-| 1 | model · working dir · `git:<branch>✱` · session duration · cost · config counts (CLAUDE.md / rules / MCPs / hooks) |
-| 2 | context bar (color-coded) · `used/size ↑in ↓out` · `5h`/`7d` rate limits (if the backend provides them) · `effort` · `thinking` · `⚡fast` |
+| 1 | model · working dir · session name · `git:<branch>✱` · `PR#<n> <state>` · session duration · cost + `+added -removed` lines · config counts (CLAUDE.md / rules / MCPs / hooks) |
+| 2 | context bar (color-coded) · `used/size ↑in ↓out` · `⤶cache <hit>%` · `5h`/`7d` rate limits + reset countdown (if the backend provides them) · `effort` · `thinking` · `⚡fast` |
 | 3 | `◐` running tools (name + target, `×N`) · `✓` completed tools (name `×N`) |
 | 4 | `▸` active task + `(done/total)` · `⊕` subagent count |
 
 Every segment degrades gracefully - fields absent from the payload (common with
 third-party backends that don't return Anthropic rate-limit headers) are simply
 omitted.
+
+The status line runs on a `refreshInterval` (1s), so token counts and the
+cache-hit percentage update live during streaming responses instead of only
+between messages.
+
+> **No account balance.** The `statusLine` payload has no balance/credit field.
+> Cost (`$X.XX`), rate-limit usage + reset countdown, and cache-hit rate are all
+> shown; true billing balance would need an out-of-band API call (credentials +
+> a network request every tick), which is intentionally out of scope here.
 
 ### Color thresholds (context bar)
 
@@ -150,6 +160,11 @@ omitted.
 
 Edit `~/.claude/statusline-hud/hud.py` (single file) and re-run `install.py`.
 Common tweaks:
+
+- **Chinese labels**: set `CLAUDE_HUD_LANG=zh` before launching Claude Code to
+  switch UI labels to Chinese (`ctx`→`上下文`, `effort`→`思考强度`,
+  `subagent`→`子代理`, …). Default is English; data (model / dir / git / tool
+  names) is never translated.
 
 - **Bar width**: `BAR_WIDTH = 20`
 - **Stale threshold** (hook state -> transcript fallback): `HOOK_STALE_MS = 5000`

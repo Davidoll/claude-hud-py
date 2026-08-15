@@ -75,7 +75,7 @@ def main():
 
     dest_fwd = DEST.replace(os.sep, "/")
     cmd = f"{py} {dest_fwd}"
-    cfg["statusLine"] = {"type": "command", "command": cmd}
+    cfg["statusLine"] = {"type": "command", "command": cmd, "refreshInterval": 1}
 
     pre_group = {"matcher": "", "hooks": [{"type": "command", "command": f"{cmd} --pre-tool"}]}
     post_group = {"matcher": "", "hooks": [{"type": "command", "command": f"{cmd} --post-tool"}]}
