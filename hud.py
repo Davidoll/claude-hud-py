@@ -25,6 +25,7 @@ import subprocess
 import tempfile
 import time
 import hashlib
+import unicodedata
 import urllib.request
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,37 @@ def safe_string(s, maxlen=4096):
     if not isinstance(s, str):
         return ""
     return s[:maxlen]
+
+
+def display_width(s):
+    """Visible width: ANSI codes don't count; CJK chars count as 2."""
+    s = ANSI_RE.sub("", s)
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in s)
+
+
+def truncate_to_width(s, max_w):
+    """Truncate s to max_w visible columns, appending '…' (keeps ANSI + reset)."""
+    if max_w <= 0 or display_width(s) <= max_w:
+        return s
+    out = []
+    width = 0
+    limit = max_w - 1
+    i, n = 0, len(s)
+    while i < n and width < limit:
+        if s[i] == "\x1b":
+            m = ANSI_RE.match(s, i)
+            if m:
+                out.append(m.group(0))
+                i = m.end()
+                continue
+        ch = s[i]
+        chw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if width + chw > limit:
+            break
+        out.append(ch)
+        width += chw
+        i += 1
+    return "".join(out) + "…" + RESET
 
 
 # ---------------------------------------------------------------------------
@@ -672,7 +704,7 @@ def build(data):
     cost_str = fmt_cost(cost.get("total_cost_usd"))
     lines_add = cost.get("total_lines_added")
     lines_rem = cost.get("total_lines_removed")
-    session_name = strip_ansi(data.get("session_name") or "")
+    session_name = truncate_to_width(strip_ansi(data.get("session_name") or ""), 24)
     pr = data.get("pr") or {}
     cw = data.get("context_window") or {}
     size = cw.get("context_window_size")
@@ -869,13 +901,24 @@ def find_latest_transcript():
         return None
 
 
+def _emit(lines):
+    """Write lines, truncating each to the terminal width (COLUMNS)."""
+    try:
+        cols = int(os.environ.get("COLUMNS", "0") or 0)
+    except (TypeError, ValueError):
+        cols = 0
+    if cols <= 0:
+        cols = 120
+    sys.stdout.write("\n".join(truncate_to_width(line, cols) for line in lines) + "\n")
+
+
 def main():
     raw = sys.stdin.read()
     try:
         data = json.loads(raw)
     except Exception:
         data = {}
-    sys.stdout.write("\n".join(build(data)) + "\n")
+    _emit(build(data))
 
 
 MOCK = {
@@ -913,7 +956,7 @@ MOCK = {
 
 if __name__ == "__main__":
     # Windows consoles default to cp936/GBK; force UTF-8 so █░⤶⊕ etc. render.
-    for _stream in (sys.stdout, sys.stderr):
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
         try:
             _stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
@@ -927,6 +970,6 @@ if __name__ == "__main__":
         tpath = find_latest_transcript()
         if tpath:
             MOCK["transcript_path"] = tpath
-        sys.stdout.write("\n".join(build(MOCK)) + "\n")
+        _emit(build(MOCK))
     else:
         main()
