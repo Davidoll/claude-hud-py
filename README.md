@@ -40,27 +40,68 @@ configures one script path.
 
 ## Requirements
 
-- Python 3.6+ (`python3` on Linux/macOS, `python` on Windows)
+- Python 3.7+ (`python3` on Linux/macOS, `python` on Windows)
 - `git` (optional - only for the git segment)
 - Claude Code with custom status-line + hooks support
 
 ## Install
+
+### One command (recommended)
+
+Paste one line into a terminal - the installer ensures **Python 3.7+**, downloads
+the project, and configures everything. You only need a network connection and a
+terminal.
+
+**Linux / macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linlinger/claude-hud-py/main/install.sh | sh
+```
+
+(No `curl`? Use `wget -qO- https://raw.githubusercontent.com/linlinger/claude-hud-py/main/install.sh | sh`.)
+
+**Windows (PowerShell):**
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/linlinger/claude-hud-py/main/install.ps1 | iex
+```
+
+(From `cmd.exe`, wrap the same command: `powershell -NoProfile -ExecutionPolicy Bypass -Command "..."`.)
+
+The installer:
+- ensures **Python 3.7+** (system package manager on Linux, Homebrew / Xcode CLT
+  on macOS, winget on Windows)
+- downloads `hud.py` / `install.py` / `uninstall.py` and runs `install.py`, which:
+  - copies `hud.py` to `~/.claude/statusline-hud/hud.py`
+  - backs up `~/.claude/settings.json` to `settings.json.bak.<timestamp>`
+  - writes the `statusLine` entry **and** `PreToolUse`/`PostToolUse` hook groups
+    (idempotent - re-running updates in place without duplicating)
+- copies `uninstall.py` next to `hud.py` for easy removal later
+
+It does **not** install Claude Code - if `claude` isn't on your PATH it warns.
+(Install it with `curl -fsSL https://claude.ai/install.sh | bash`, or
+`irm https://claude.ai/install.ps1 | iex` on Windows.)
+
+Restart Claude Code (or wait for the next status tick) and the bar appears.
+The hooks start recording tool calls immediately.
+
+### Manual
 
 ```bash
 cd claude-hud-py
 python3 install.py      # Linux/macOS  (Windows: python install.py)
 ```
 
-This:
-- copies `hud.py` to `~/.claude/statusline-hud/hud.py`
-- backs up `~/.claude/settings.json` to `settings.json.bak.<timestamp>`
-- writes the `statusLine` entry **and** `PreToolUse`/`PostToolUse` hook groups
-  (idempotent - re-running updates in place without duplicating)
-
-Restart Claude Code (or wait for the next status tick) and the bar appears.
-The hooks start recording tool calls immediately.
-
 ## Uninstall
+
+One command (if you installed via the one-liner above):
+
+```bash
+python3 ~/.claude/statusline-hud/uninstall.py                          # Linux/macOS
+python %USERPROFILE%\.claude\statusline-hud\uninstall.py               # Windows
+```
+
+Manual (from a clone of the repo):
 
 ```bash
 python3 uninstall.py    # Windows: python uninstall.py
@@ -132,7 +173,9 @@ echo '{"tool_name":"Bash","tool_input":{"command":"ls"},"transcript_path":"/tmp/
 ```
 claude-hud-py/
 ├── hud.py          # statusLine + PreToolUse/PostToolUse hooks (single file)
-├── install.py      # cross-platform installer
+├── install.py      # cross-platform installer (the actual copy + settings.json)
+├── install.sh      # one-command installer (Linux / macOS)
+├── install.ps1     # one-command installer (Windows)
 ├── uninstall.py    # cross-platform uninstaller
 └── README.md
 ```
